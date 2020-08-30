@@ -31,8 +31,9 @@ async fn run(event_loop: EventLoop<()>, window: Window, swapchain_format: wgpu::
         .expect("Failed to create device");
 
     // Load the shaders from disk
-    let vs_module = device.create_shader_module(wgpu::include_spirv!("shader.vert.spv"));
+    let up_module = device.create_shader_module(wgpu::include_spirv!("up.vert.spv"));
     let fs_module = device.create_shader_module(wgpu::include_spirv!("shader.frag.spv"));
+    let down_module = device.create_shader_module(wgpu::include_spirv!("down.vert.spv"));
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: None,
@@ -40,11 +41,69 @@ async fn run(event_loop: EventLoop<()>, window: Window, swapchain_format: wgpu::
         push_constant_ranges: &[],
     });
 
-    let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    let up_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: None,
         layout: Some(&pipeline_layout),
         vertex_stage: wgpu::ProgrammableStageDescriptor {
-            module: &vs_module,
+            module: &up_module,
+            entry_point: "main",
+        },
+        fragment_stage: Some(wgpu::ProgrammableStageDescriptor {
+            module: &fs_module,
+            entry_point: "main",
+        }),
+        // Use the default rasterizer state: no culling, no depth bias
+        rasterization_state: None,
+        primitive_topology: wgpu::PrimitiveTopology::TriangleList,
+        color_states: &[wgpu::ColorStateDescriptor {
+            format: swapchain_format,
+            color_blend: wgpu::BlendDescriptor {
+                src_factor: wgpu::BlendFactor::SrcAlpha,
+                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha_blend: wgpu::BlendDescriptor {
+                src_factor: wgpu::BlendFactor::SrcAlpha,
+                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                operation: wgpu::BlendOperation::Add,
+            },
+            write_mask: wgpu::ColorWrite::empty(),
+        }],
+        depth_stencil_state: Some(wgpu::DepthStencilStateDescriptor {
+            format: wgpu::TextureFormat::Depth24PlusStencil8,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::Always,
+            stencil: wgpu::StencilStateDescriptor {
+                front: wgpu::StencilStateFaceDescriptor {
+                    compare: wgpu::CompareFunction::Always,
+                    fail_op: wgpu::StencilOperation::Keep,
+                    depth_fail_op: wgpu::StencilOperation::Keep,
+                    pass_op: wgpu::StencilOperation::Replace,
+                },
+                back: wgpu::StencilStateFaceDescriptor {
+                    compare: wgpu::CompareFunction::Always,
+                    fail_op: wgpu::StencilOperation::Keep,
+                    depth_fail_op: wgpu::StencilOperation::Keep,
+                    pass_op: wgpu::StencilOperation::Replace,
+                },
+                read_mask: 0,
+                write_mask: 1,
+            },
+        }),
+        vertex_state: wgpu::VertexStateDescriptor {
+            index_format: wgpu::IndexFormat::Uint16,
+            vertex_buffers: &[],
+        },
+        sample_count: 1,
+        sample_mask: !0,
+        alpha_to_coverage_enabled: false,
+    });
+
+    let down_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: None,
+        layout: Some(&pipeline_layout),
+        vertex_stage: wgpu::ProgrammableStageDescriptor {
+            module: &down_module,
             entry_point: "main",
         },
         fragment_stage: Some(wgpu::ProgrammableStageDescriptor {
@@ -55,7 +114,27 @@ async fn run(event_loop: EventLoop<()>, window: Window, swapchain_format: wgpu::
         rasterization_state: None,
         primitive_topology: wgpu::PrimitiveTopology::TriangleList,
         color_states: &[swapchain_format.into()],
-        depth_stencil_state: None,
+        depth_stencil_state: Some(wgpu::DepthStencilStateDescriptor {
+            format: wgpu::TextureFormat::Depth24PlusStencil8,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::Always,
+            stencil: wgpu::StencilStateDescriptor {
+                front: wgpu::StencilStateFaceDescriptor {
+                    compare: wgpu::CompareFunction::Equal,
+                    fail_op: wgpu::StencilOperation::Keep,
+                    depth_fail_op: wgpu::StencilOperation::Keep,
+                    pass_op: wgpu::StencilOperation::Keep,
+                },
+                back: wgpu::StencilStateFaceDescriptor {
+                    compare: wgpu::CompareFunction::Equal,
+                    fail_op: wgpu::StencilOperation::Keep,
+                    depth_fail_op: wgpu::StencilOperation::Keep,
+                    pass_op: wgpu::StencilOperation::Keep,
+                },
+                read_mask: 1,
+                write_mask: 0,
+            },
+        }),
         vertex_state: wgpu::VertexStateDescriptor {
             index_format: wgpu::IndexFormat::Uint16,
             vertex_buffers: &[],
@@ -64,6 +143,22 @@ async fn run(event_loop: EventLoop<()>, window: Window, swapchain_format: wgpu::
         sample_mask: !0,
         alpha_to_coverage_enabled: false,
     });
+
+    let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d {
+            width: size.width,
+            height: size.height,
+            depth: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth24PlusStencil8,
+        usage: wgpu::TextureUsage::OUTPUT_ATTACHMENT,
+    });
+
+    let depth_texture_view = depth_texture.create_view(&Default::default());
 
     let mut sc_desc = wgpu::SwapChainDescriptor {
         usage: wgpu::TextureUsage::OUTPUT_ATTACHMENT,
@@ -82,7 +177,8 @@ async fn run(event_loop: EventLoop<()>, window: Window, swapchain_format: wgpu::
         let _ = (
             &instance,
             &adapter,
-            &vs_module,
+            &up_module,
+            &down_module,
             &fs_module,
             &pipeline_layout,
         );
@@ -115,9 +211,27 @@ async fn run(event_loop: EventLoop<()>, window: Window, swapchain_format: wgpu::
                                 store: true,
                             },
                         }],
-                        depth_stencil_attachment: None,
+                        depth_stencil_attachment: Some(
+                            wgpu::RenderPassDepthStencilAttachmentDescriptor {
+                                attachment: &depth_texture_view,
+                                depth_ops: Some(wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: true,
+                                }),
+                                stencil_ops: Some(wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: true,
+                                }),
+                            },
+                        ),
                     });
-                    rpass.set_pipeline(&render_pipeline);
+
+                    rpass.set_pipeline(&up_pipeline);
+                    rpass.set_stencil_reference(1);
+                    rpass.draw(0..3, 0..1);
+
+                    rpass.set_pipeline(&down_pipeline);
+                    rpass.set_stencil_reference(1);
                     rpass.draw(0..3, 0..1);
                 }
 
